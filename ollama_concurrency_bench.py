@@ -18,7 +18,6 @@ Requirements:
 """
 
 import asyncio
-import aiohttp
 import argparse
 import json
 import time
@@ -26,6 +25,17 @@ import sys
 import os
 from dataclasses import dataclass, field
 from typing import Optional
+
+# Fix #6: Graceful dependency handling instead of a bare ImportError traceback.
+try:
+    import aiohttp
+except ImportError:
+    print(
+        "ERROR: 'aiohttp' is required but not installed.\n"
+        "Install it with:  pip install aiohttp",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 # Fix Windows console encoding
 if sys.platform == "win32":
@@ -141,7 +151,8 @@ async def send_request(
         prompt_preview=prompt[:60] + "..." if len(prompt) > 60 else prompt,
     )
 
-    url = f"{base_url}/api/generate"
+    # Fix #4: Normalize base_url to prevent double-slash in the endpoint path.
+    url = f"{base_url.rstrip('/')}/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
@@ -153,6 +164,9 @@ async def send_request(
     }
 
     result.start_time = time.monotonic()
+
+    # Fix #5: Use a list collector instead of quadratic string concatenation.
+    response_chunks: list[str] = []
 
     try:
         async with session.post(
@@ -167,7 +181,9 @@ async def send_request(
                 return result
 
             async for line in response.content:
-                line = line.decode("utf-8").strip()
+                # Fix #3: Use errors="replace" to avoid UnicodeDecodeError on
+                # multibyte characters split across streaming chunk boundaries.
+                line = line.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
 
@@ -181,13 +197,16 @@ async def send_request(
                     result.first_token_time = time.monotonic()
 
                 if chunk.get("response"):
-                    result.total_response += chunk["response"]
-                    result.tokens_generated += 1
+                    response_chunks.append(chunk["response"])
 
                 # Stream finished
                 if chunk.get("done", False):
+                    # Fix #1: Use Ollama's authoritative eval_count instead of
+                    # counting JSON chunks, which do NOT map 1:1 to tokens.
+                    result.tokens_generated = int(chunk.get("eval_count", 0))
                     break
 
+        result.total_response = "".join(response_chunks)
         result.status = "success"
 
     except asyncio.TimeoutError:
@@ -256,7 +275,11 @@ def analyze_concurrency(report: BenchmarkReport) -> dict:
 
     successful = report.successful_results
     if len(successful) < 2:
-        return {"verdict": "INSUFFICIENT_DATA", "overlap_ratio": 0.0}
+        return {
+            "verdict": "INSUFFICIENT_DATA",
+            "overlap_ratio": 0.0,
+            "theoretical_speedup": 0.0,
+        }
 
     # Calculate temporal overlap
     # If requests are parallel, their time windows overlap
@@ -267,38 +290,33 @@ def analyze_concurrency(report: BenchmarkReport) -> dict:
     ]
     intervals.sort(key=lambda x: x[0])
 
-    total_overlap = 0.0
-    total_span = 0.0
-
-    for i in range(len(intervals)):
-        for j in range(i + 1, len(intervals)):
-            start_i, end_i = intervals[i]
-            start_j, end_j = intervals[j]
-
-            overlap_start = max(start_i, start_j)
-            overlap_end = min(end_i, end_j)
-
-            if overlap_start < overlap_end:
-                total_overlap += overlap_end - overlap_start
-
     # Total span = time from the first start to the last end
-    if intervals:
-        total_span = intervals[-1][1] - intervals[0][0]
+    total_span = intervals[-1][1] - intervals[0][0] if intervals else 0.0
 
     # Calculate theoretical time if serialized
     sum_individual = sum(r.total_time for r in successful)
 
-    # Overlap ratio: 0.0 = totally serialized, 1.0 = totally parallel
-    if sum_individual > 0:
-        overlap_ratio = 1.0 - (total_span / sum_individual)
-        overlap_ratio = max(0.0, overlap_ratio)
+    # Fix #2: Speedup-based overlap ratio that works correctly for any N >= 2.
+    # The old formula (1 - total_span / sum_individual) is capped at 0.5 for N=2,
+    # making the PARALLEL verdict unreachable. The new formula normalizes the
+    # speedup factor against the theoretical maximum (N concurrent requests).
+    num_valid = len(successful)
+    if total_span > 0:
+        speedup = sum_individual / total_span
+    else:
+        speedup = 0.0
+
+    # Normalize: speedup=1 (serialized) -> 0.0, speedup=N (perfect parallel) -> 1.0
+    if num_valid > 1:
+        overlap_ratio = (speedup - 1.0) / (num_valid - 1.0)
+        overlap_ratio = max(0.0, min(1.0, overlap_ratio))
     else:
         overlap_ratio = 0.0
 
-    # Verdict
-    if overlap_ratio > 0.5:
+    # Verdict (adjusted thresholds for the new normalized scale)
+    if overlap_ratio > 0.6:
         verdict = "PARALLEL"
-    elif overlap_ratio > 0.1:
+    elif overlap_ratio > 0.15:
         verdict = "PARTIAL_PARALLEL"
     else:
         verdict = "SERIALIZED"
@@ -308,7 +326,7 @@ def analyze_concurrency(report: BenchmarkReport) -> dict:
         "overlap_ratio": overlap_ratio,
         "total_span": total_span,
         "sum_individual": sum_individual,
-        "theoretical_speedup": sum_individual / total_span if total_span > 0 else 0,
+        "theoretical_speedup": speedup,
     }
 
 
@@ -366,14 +384,14 @@ def print_report(report: BenchmarkReport):
     print(f"  CONCURRENCY ANALYSIS")
     print(f"{'-'*72}")
 
-    verdict_emoji = {
+    verdict_label = {
         "PARALLEL": "[+] PARALLEL",
         "PARTIAL_PARALLEL": "[~] PARTIAL PARALLELISM",
         "SERIALIZED": "[!] SERIALIZED",
         "INSUFFICIENT_DATA": "[?] INSUFFICIENT DATA",
     }
 
-    print(f"  Verdict:           {verdict_emoji.get(analysis['verdict'], analysis['verdict'])}")
+    print(f"  Verdict:           {verdict_label.get(analysis['verdict'], analysis['verdict'])}")
     print(f"  Overlap Ratio:     {analysis.get('overlap_ratio', 0):.2%}")
     print(f"  Theoretical Speedup: {analysis.get('theoretical_speedup', 0):.2f}x")
 
