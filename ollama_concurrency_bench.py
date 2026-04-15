@@ -17,6 +17,8 @@ Requirements:
     pip install aiohttp
 """
 
+from __future__ import annotations
+
 import asyncio
 import argparse
 import json
@@ -24,7 +26,7 @@ import time
 import sys
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 
 # Fix #6: Graceful dependency handling instead of a bare ImportError traceback.
 try:
@@ -103,7 +105,7 @@ class RequestResult:
     @property
     def tokens_per_second(self) -> float:
         """Generation speed (tokens/s)."""
-        gen_time = self.total_time - (self.ttft or 0)
+        gen_time = self.total_time - (self.ttft if self.ttft is not None else 0)
         if gen_time > 0 and self.tokens_generated > 0:
             return self.tokens_generated / gen_time
         return 0.0
@@ -166,7 +168,7 @@ async def send_request(
     result.start_time = time.monotonic()
 
     # Fix #5: Use a list collector instead of quadratic string concatenation.
-    response_chunks: list[str] = []
+    response_chunks: List[str] = []
 
     try:
         async with session.post(
@@ -330,7 +332,7 @@ def analyze_concurrency(report: BenchmarkReport) -> dict:
     }
 
 
-def print_report(report: BenchmarkReport):
+def print_report(report: BenchmarkReport, output_dir: str = "bench_results"):
     """Prints the detailed benchmark report."""
 
     successful = report.successful_results
@@ -369,12 +371,14 @@ def print_report(report: BenchmarkReport):
     print(f"  Wall Clock Total:  {report.wall_clock_time:.3f}s")
 
     if successful:
-        avg_ttft = sum(r.ttft for r in successful if r.ttft is not None) / max(1, len([r for r in successful if r.ttft is not None]))
+        ttft_values = [r.ttft for r in successful if r.ttft is not None]
+        avg_ttft = sum(ttft_values) / len(ttft_values) if ttft_values else None
         avg_tps = sum(r.tokens_per_second for r in successful) / len(successful)
         total_tokens = sum(r.tokens_generated for r in successful)
         aggregate_tps = total_tokens / report.wall_clock_time if report.wall_clock_time > 0 else 0
+        avg_ttft_display = f"{avg_ttft:.3f}s" if avg_ttft is not None else "N/A"
 
-        print(f"  Avg TTFT:          {avg_ttft:.3f}s")
+        print(f"  Avg TTFT:          {avg_ttft_display}")
         print(f"  Avg Tok/s (indiv): {avg_tps:.1f}")
         print(f"  Total Tokens:      {total_tokens}")
         print(f"  Aggregate Tok/s:   {aggregate_tps:.1f}")
@@ -451,11 +455,11 @@ def print_report(report: BenchmarkReport):
 
     safe_model = "".join(c if (c.isalnum() or c in "._-") else "_" for c in report.model)
     safe_model = safe_model.lstrip("._-") or "model"
-    output_dir = os.path.realpath("bench_results")
-    os.makedirs(output_dir, exist_ok=True)
+    resolved_dir = os.path.realpath(output_dir)
+    os.makedirs(resolved_dir, exist_ok=True)
     filename = f"bench_result_{safe_model}_{int(time.time())}.json"
-    export_path = os.path.realpath(os.path.join(output_dir, filename))
-    if os.path.commonpath([output_dir, export_path]) != output_dir:
+    export_path = os.path.realpath(os.path.join(resolved_dir, filename))
+    if os.path.commonpath([resolved_dir, export_path]) != resolved_dir:
         raise ValueError("Resolved export path escapes output directory")
     with open(export_path, "w", encoding="utf-8") as f:
         json.dump(export, f, indent=2, ensure_ascii=False)
@@ -503,6 +507,11 @@ Examples:
         default=DEFAULT_TIMEOUT,
         help=f"Timeout per request in seconds (default: {DEFAULT_TIMEOUT})",
     )
+    parser.add_argument(
+        "--output-dir", "-o",
+        default="bench_results",
+        help="Directory for JSON result exports (default: bench_results)",
+    )
 
     args = parser.parse_args()
 
@@ -516,7 +525,7 @@ Examples:
         )
     )
 
-    print_report(report)
+    print_report(report, output_dir=args.output_dir)
 
     # Exit code based on the verdict
     analysis = analyze_concurrency(report)
