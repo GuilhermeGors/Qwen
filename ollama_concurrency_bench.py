@@ -91,7 +91,7 @@ class RequestResult:
     @property
     def ttft(self) -> Optional[float]:
         """Time To First Token (seconds)."""
-        if self.first_token_time and self.start_time:
+        if self.first_token_time is not None:
             return self.first_token_time - self.start_time
         return None
 
@@ -349,7 +349,7 @@ def print_report(report: BenchmarkReport):
 
     for r in sorted(report.results, key=lambda x: x.start_time):
         status = "[OK]" if r.status == "success" else "[FAIL]"
-        ttft = f"{r.ttft:.3f}" if r.ttft else "N/A"
+        ttft = f"{r.ttft:.3f}" if r.ttft is not None else "N/A"
         total = f"{r.total_time:.3f}"
         tokens = str(r.tokens_generated)
         tps = f"{r.tokens_per_second:.1f}" if r.tokens_per_second > 0 else "N/A"
@@ -369,7 +369,7 @@ def print_report(report: BenchmarkReport):
     print(f"  Wall Clock Total:  {report.wall_clock_time:.3f}s")
 
     if successful:
-        avg_ttft = sum(r.ttft for r in successful if r.ttft) / max(1, len([r for r in successful if r.ttft]))
+        avg_ttft = sum(r.ttft for r in successful if r.ttft is not None) / max(1, len([r for r in successful if r.ttft is not None]))
         avg_tps = sum(r.tokens_per_second for r in successful) / len(successful)
         total_tokens = sum(r.tokens_generated for r in successful)
         aggregate_tps = total_tokens / report.wall_clock_time if report.wall_clock_time > 0 else 0
