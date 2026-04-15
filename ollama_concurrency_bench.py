@@ -449,10 +449,17 @@ def print_report(report: BenchmarkReport):
         ],
     }
 
-    filename = f"bench_result_{report.model.replace(':', '_').replace('/', '_')}_{int(time.time())}.json"
-    with open(filename, "w", encoding="utf-8") as f:
+    safe_model = "".join(c if (c.isalnum() or c in "._-") else "_" for c in report.model)
+    safe_model = safe_model.lstrip("._-") or "model"
+    output_dir = os.path.realpath("bench_results")
+    os.makedirs(output_dir, exist_ok=True)
+    filename = f"bench_result_{safe_model}_{int(time.time())}.json"
+    export_path = os.path.realpath(os.path.join(output_dir, filename))
+    if os.path.commonpath([output_dir, export_path]) != output_dir:
+        raise ValueError("Resolved export path escapes output directory")
+    with open(export_path, "w", encoding="utf-8") as f:
         json.dump(export, f, indent=2, ensure_ascii=False)
-    print(f"  [FILE] Results exported to: {filename}\n")
+    print(f"  [FILE] Results exported to: {export_path}\n")
 
 
 # ─── Entry Point ────────────────────────────────────────────
